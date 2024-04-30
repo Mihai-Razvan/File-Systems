@@ -9,6 +9,7 @@
 #include "../include/diskCodes.h"
 #include "../include/fat32Init.h"
 #include "../include/utils.h"
+#include "../include/structures.h"
 #include "../include/codes/fat32Codes.h"
 #include "../include/codes/fat32ApiResponseCodes.h"
 #include "../include/fat32Attributes.h"
@@ -16,7 +17,9 @@
 #include "../include/fat32FunctionUtils.h"
 #include "../include/fat32Api.h"
 
-uint32_t createDirectory(DiskInfo* diskInfo, BootSector* bootSector, char* directoryParentPath, char* newDirectoryName, uint32_t newDirectoryAttribute)
+uint32_t
+
+createDirectory(DiskInfo* diskInfo, BootSector* bootSector, char* directoryParentPath, char* newDirectoryName, uint32_t newDirectoryAttribute)
 {
     if(!checkDirectoryNameValidity(newDirectoryName))
         return DIR_CREATION_INVALID_DIRNAME;
@@ -33,7 +36,7 @@ uint32_t createDirectory(DiskInfo* diskInfo, BootSector* bootSector, char* direc
                                                                                              newDirectoryName,
                                                                                              new DirectoryEntry());
 
-    if(actualDirectoryEntry->Attributes != ATTR_DIRECTORY)
+    if(actualDirectoryEntry->Attributes != ATTR_FOLDER)
     {
         delete actualDirectoryEntry;
         return DIR_CREATION_PARENT_NOT_A_FOLDER;
@@ -80,7 +83,7 @@ uint32_t createDirectory(DiskInfo* diskInfo, BootSector* bootSector, char* direc
     return DIR_CREATION_SUCCESS;
 }
 
-uint32_t getSubDirectories(DiskInfo* diskInfo, BootSector* bootSector, char* directoryPath, std::vector<DirectoryEntry*>& subDirectories) //TODO REFACTOR
+uint32_t getSubDirectoriesByParentPath(DiskInfo* diskInfo, BootSector* bootSector, char* directoryPath, std::vector<DirectoryEntry*>& subDirectories)
 {
     DirectoryEntry* actualDirectoryEntry = nullptr;
     uint32_t findDirectoryEntryResult = findDirectoryEntryByFullPath(diskInfo, bootSector, directoryPath,
@@ -88,62 +91,13 @@ uint32_t getSubDirectories(DiskInfo* diskInfo, BootSector* bootSector, char* dir
     if(findDirectoryEntryResult != FIND_DIRECTORY_ENTRY_BY_PATH_SUCCESS)
         return GET_SUB_DIRECTORIES_FAILED;
 
-    char* clusterData = new char[getClusterSize(bootSector)]; //declare here for time efficiency
-
-    uint32_t actualCluster = getFirstClusterForDirectory(bootSector, actualDirectoryEntry);  //directory first cluster
-    uint32_t offsetInCluster = 64; //we start from 64 because in the first sector of the first cluster we got dot & dotdot
-    uint32_t numberOfClusterInParentDirectory = 0; //the cluster number in chain
-    uint32_t occupiedBytesInCluster = 0; //if the cluster is full, then it is cluster size, otherwise smaller
-
-    while (true)
+    if(actualDirectoryEntry->Attributes != ATTR_FOLDER)
     {
-        occupiedBytesInCluster = actualDirectoryEntry->FileSize >= getClusterSize(bootSector) * (numberOfClusterInParentDirectory + 1) ? getClusterSize(bootSector)
-                                                                                                                    : actualDirectoryEntry->FileSize % getClusterSize(bootSector);
-
-        uint32_t numOfSectorsRead = 0;
-        int readResult = readDiskSectors(diskInfo, bootSector->SectorsPerCluster, getFirstSectorForCluster(bootSector, actualCluster), 
-                                         clusterData, numOfSectorsRead);
-
-        if(readResult == EC_NO_ERROR)
-        {
-            for(; offsetInCluster < occupiedBytesInCluster; offsetInCluster += 32)
-            {
-                DirectoryEntry* directoryEntry = new DirectoryEntry(); //same for time efficiency
-                memcpy(directoryEntry, clusterData + offsetInCluster, 32);
-                subDirectories.push_back(directoryEntry);
-            }
-        }
-        else
-        {
-            if(actualDirectoryEntry != nullptr)
-                delete actualDirectoryEntry;
-            delete[] clusterData;
-            return GET_SUB_DIRECTORIES_SUCCESS;
-        }
-
-        uint32_t nextCluster = 0;
-        uint32_t getNextClusterResult = getNextCluster(diskInfo, bootSector, actualCluster, nextCluster);
-
-        if(getNextClusterResult == FAT_VALUE_RETRIEVE_FAILED)
-        {
-            if(actualDirectoryEntry != nullptr)
-                delete actualDirectoryEntry;
-            delete[] clusterData;
-            return GET_SUB_DIRECTORIES_FAILED;
-        }
-
-        if(getNextClusterResult == FAT_VALUE_EOC)
-        {
-            if(actualDirectoryEntry != nullptr)
-                delete actualDirectoryEntry;
-            delete[] clusterData;
-            return GET_SUB_DIRECTORIES_SUCCESS;
-        }
-
-        actualCluster = nextCluster;
-        numberOfClusterInParentDirectory++;
-        offsetInCluster = 0; //64 is only for the first cluster, for the rest of them is 0
+        delete actualDirectoryEntry;
+        return GET_SUB_DIRECTORIES_GIVEN_DIRECTORY_CAN_NOT_CONTAIN_SUBDIRECTORIES;
     }
+
+    return getSubDirectoriesByParentDirectoryEntry(diskInfo, bootSector, actualDirectoryEntry, subDirectories);
 }
 
 uint32_t write(DiskInfo* diskInfo, BootSector* bootSector, char* directoryPath, char* dataBuffer, uint32_t maxBytesToWrite, uint32_t& numberOfBytesWritten, uint32_t writeAttribute,
@@ -182,6 +136,9 @@ uint32_t write(DiskInfo* diskInfo, BootSector* bootSector, char* directoryPath, 
 
         DirectoryEntry* newDirectoryEntry = new DirectoryEntry();
         memcpy(newDirectoryEntry, actualDirectoryEntry, 32);
+        newDirectoryEntry->LastAccessedDate = getCurrentDateFormatted();
+        newDirectoryEntry->LastWriteDate = newDirectoryEntry->LastAccessedDate;
+        newDirectoryEntry->LastWriteTime = getCurrentTimeFormatted();
         updateDirectoryEntry(diskInfo, bootSector, actualDirectoryEntry, newDirectoryEntry); //CAUTION we don't query this, so if it fails, we have corrupted data
 
         delete actualDirectoryEntry, delete newDirectoryEntry;
@@ -253,8 +210,15 @@ uint32_t read(DiskInfo* diskInfo, BootSector* bootSector, char* directoryPath, c
 
         if(getNextClusterResult == FAT_VALUE_RETRIEVE_FAILED || getNextClusterResult == FAT_VALUE_EOC)
         {
-            delete[] clusterData, delete actualDirectoryEntry;
             reasonForIncompleteRead = (getNextClusterResult == FAT_VALUE_EOC) ? INCOMPLETE_BYTES_READ_DUE_TO_NO_FILE_NOT_LONG_ENOUGH : INCOMPLETE_BYTES_READ_DUE_TO_OTHER;
+
+            DirectoryEntry* newDirectoryEntry = new DirectoryEntry();
+            memcpy(newDirectoryEntry, actualDirectoryEntry, 32);
+            newDirectoryEntry->LastAccessedDate = getCurrentDateFormatted();
+            //CAUTION we don't query this, so if it fails, we have bad data for time & date(unimportant anyway)
+            updateDirectoryEntry(diskInfo, bootSector, actualDirectoryEntry, newDirectoryEntry);
+
+            delete[] clusterData, delete actualDirectoryEntry;
             return READ_BYTES_FROM_FILE_SUCCESS; //we managed to read bytes for first cluster, so it's still considered a read success
         }
 
@@ -273,6 +237,12 @@ uint32_t read(DiskInfo* diskInfo, BootSector* bootSector, char* directoryPath, c
         numberOfBytesRead += numOfBytesReadFromThisCluster;
     }
 
+    DirectoryEntry* newDirectoryEntry = new DirectoryEntry();
+    memcpy(newDirectoryEntry, actualDirectoryEntry, 32);
+    newDirectoryEntry->LastAccessedDate = getCurrentDateFormatted();
+    //CAUTION we don't query this, so if it fails, we have bad data for time & date(unimportant anyway)
+    updateDirectoryEntry(diskInfo, bootSector, actualDirectoryEntry, newDirectoryEntry);
+
     delete[] clusterData, delete actualDirectoryEntry;
     return READ_BYTES_FROM_FILE_SUCCESS;
 }
@@ -280,18 +250,18 @@ uint32_t read(DiskInfo* diskInfo, BootSector* bootSector, char* directoryPath, c
 uint32_t truncateFile(DiskInfo* diskInfo, BootSector* bootSector, char* directoryPath, uint32_t newSize)
 {
     if(strcmp(directoryPath, "Root\0") == 0) //you can't truncate the root
-        return TRUNCATE_FILE_CAN_NOT_TRUNCATE_GIVEN_FILE;
+        return TRUNCATE_FILE_CAN_NOT_TRUNCATE_GIVEN_FILE_TYPE;
 
     DirectoryEntry* actualDirectoryEntry = nullptr;
     uint32_t findDirectoryEntryResult = findDirectoryEntryByFullPath(diskInfo, bootSector, directoryPath,
                                                                      &actualDirectoryEntry);
     if(findDirectoryEntryResult != FIND_DIRECTORY_ENTRY_BY_PATH_SUCCESS)
-        return TRUNCATE_FILE_FAILED;
+        return TRUNCATE_FILE_GIVEN_FILE_DO_NOT_EXIST_OR_SEARCH_FAIL;
 
     if(actualDirectoryEntry->Attributes != ATTR_FILE)
     {
         delete actualDirectoryEntry;
-        return TRUNCATE_FILE_CAN_NOT_TRUNCATE_GIVEN_FILE;
+        return TRUNCATE_FILE_CAN_NOT_TRUNCATE_GIVEN_FILE_TYPE;
     }
 
     newSize += 64; //the given value refers only to the size of the file content, so it is not taking in account 64 for dot & dotdot
@@ -301,15 +271,36 @@ uint32_t truncateFile(DiskInfo* diskInfo, BootSector* bootSector, char* director
     DirectoryEntry* newDirectoryEntry = new DirectoryEntry();
     memcpy(newDirectoryEntry, actualDirectoryEntry, 32);
     newDirectoryEntry->FileSize = newSize;
+    newDirectoryEntry->LastAccessedDate = getCurrentDateFormatted();
+    newDirectoryEntry->LastWriteDate = newDirectoryEntry->LastWriteDate;
+    newDirectoryEntry->LastWriteTime = getCurrentTimeFormatted();
     uint32_t directoryEntryUpdateResult = updateDirectoryEntry(diskInfo, bootSector, actualDirectoryEntry, newDirectoryEntry);
 
-    return (directoryEntryUpdateResult == DIRECTORY_ENTRY_UPDATE_SUCCESS) ? TRUNCATE_FILE_SUCCESS : TRUNCATE_FILE_FAILED;
+    if(directoryEntryUpdateResult == DIRECTORY_ENTRY_UPDATE_FAILED)
+        return TRUNCATE_FILE_FAILED_FOR_OTHER_REASON;
+
+    uint32_t remainedOccupiedClusters = newDirectoryEntry->FileSize / getClusterSize(bootSector) + 1;
+    if(newDirectoryEntry->FileSize % getClusterSize(bootSector) == 0)
+        remainedOccupiedClusters--;
+
+    //CAUTION we don't query the result for the next operations so we can have a truncate success, but the fat would be corrupted (we will have trash clusters)
+    uint32_t cluster;
+    uint32_t nextCluster;
+    uint32_t firstClusterInDirectory = getFirstClusterForDirectory(bootSector, newDirectoryEntry);
+    findNthClusterInChain(diskInfo, bootSector, firstClusterInDirectory,remainedOccupiedClusters - 1, cluster); //now cluster is the last cluster in the directory (after truncate)
+    uint32_t getNextClusterResult = getNextCluster(diskInfo, bootSector, cluster, nextCluster);
+    updateFat(diskInfo, bootSector, cluster, "\xFF\xFF\xFF\x0F"); //sets last cluster after truncate as EOC
+
+    if(!(getNextClusterResult == FAT_VALUE_RETRIEVE_FAILED || getNextClusterResult == FAT_VALUE_EOC)) //if it fails to retrieve, then we will have trash clusters
+        freeClustersInChainStartingWithGivenCluster(diskInfo, bootSector, nextCluster);
+
+    return TRUNCATE_FILE_SUCCESS; //even if fails to free the no longer occupied clusters, the truncate still worked, so it's considered a success, but will remain some trash clusters
 }
 
 uint32_t deleteDirectoryByPath(DiskInfo* diskInfo, BootSector* bootSector, char* directoryPath)
 {
     if(strcmp(directoryPath, "Root\0") == 0) //you can't delete the root
-        return DELETE_DIRECTORY_CAN_NOT_DELETE_GIVEN_DIRECTORY;
+        return DELETE_DIRECTORY_CAN_NOT_DELETE_ROOT;
 
     char* parentPath = new char[strlen(directoryPath)];
     extractParentPathFromPath(directoryPath, parentPath);
@@ -318,18 +309,86 @@ uint32_t deleteDirectoryByPath(DiskInfo* diskInfo, BootSector* bootSector, char*
     uint32_t findDirectoryEntryResult = findDirectoryEntryByFullPath(diskInfo, bootSector, directoryPath,
                                                                      &actualDirectoryEntry);
     if(findDirectoryEntryResult != FIND_DIRECTORY_ENTRY_BY_PATH_SUCCESS)
-        return DELETE_DIRECTORY_FAILED;
+        return DELETE_DIRECTORY_FAILED_FOR_OTHER_REASON;
 
     DirectoryEntry* parentDirectoryEntry = nullptr;
-    findDirectoryEntryResult = findDirectoryEntryByFullPath(diskInfo, bootSector, directoryPath,
+    findDirectoryEntryResult = findDirectoryEntryByFullPath(diskInfo, bootSector, parentPath,
                                                                      &parentDirectoryEntry);
     if(findDirectoryEntryResult != FIND_DIRECTORY_ENTRY_BY_PATH_SUCCESS)
-        return DELETE_DIRECTORY_FAILED;
+        return DELETE_DIRECTORY_FAILED_FOR_OTHER_REASON;
 
-    uint32_t deleteDirectoryEntryResult = deleteDirectoryEntry(diskInfo, bootSector, actualDirectoryEntry);
-    if(deleteDirectoryEntryResult != DELETE_DIRECTORY_ENTRY_SUCCESS)
-        return DELETE_DIRECTORY_FAILED;
+    uint32_t freeClustersOfDirectoryAndParentResult = freeClustersOfDirectoryAndChildren(diskInfo, bootSector, actualDirectoryEntry);
+    if(freeClustersOfDirectoryAndParentResult != FREE_CLUSTERS_OF_DIRECTORY_AND_CHILDREN_SUCCESS)
+        return DELETE_DIRECTORY_FAILED_FOR_OTHER_REASON;
 
     uint32_t deleteDirectoryEntryForParentResult = deleteDirectoryEntryFromParent(diskInfo, bootSector, actualDirectoryEntry, parentDirectoryEntry);
-    return (deleteDirectoryEntryForParentResult == DELETE_DIRECTORY_ENTRY_SUCCESS) ? DELETE_DIRECTORY_SUCCESS : DELETE_DIRECTORY_ENTRY_FAILED;
+    return (deleteDirectoryEntryForParentResult == DELETE_DIRECTORY_ENTRY_SUCCESS) ? DELETE_DIRECTORY_SUCCESS : DELETE_DIRECTORY_FAILED_FOR_OTHER_REASON;
+}
+
+uint32_t getDirectoryFullSizeByPath(DiskInfo* diskInfo, BootSector* bootSector, char* directoryPath, uint32_t& size, uint32_t& sizeOnDisk)
+{
+    char* parentPath = new char[strlen(directoryPath)];
+    extractParentPathFromPath(directoryPath, parentPath);
+
+    DirectoryEntry* actualDirectoryEntry = nullptr;
+    uint32_t findDirectoryEntryResult = findDirectoryEntryByFullPath(diskInfo, bootSector, directoryPath,
+                                                                     &actualDirectoryEntry);
+    if(findDirectoryEntryResult != FIND_DIRECTORY_ENTRY_BY_PATH_SUCCESS)
+        return DIR_GET_FULL_SIZE_FAILED;
+
+    uint32_t numOfClustersOccupiedClusters = actualDirectoryEntry->FileSize / getClusterSize(bootSector);
+    if(actualDirectoryEntry->FileSize % getClusterSize(bootSector) == 0) //in case the size occupies the last sector at maximum
+        numOfClustersOccupiedClusters--;
+
+    sizeOnDisk = numOfClustersOccupiedClusters * getClusterSize(bootSector);
+    size = actualDirectoryEntry->FileSize;
+
+    return getDirectoryDetailsByDirectoryEntry(diskInfo, bootSector, actualDirectoryEntry, size, sizeOnDisk);
+}
+
+uint32_t getDirectoryDisplayableAttributes(DiskInfo* diskInfo, BootSector* bootSector, char* directoryPath, DirectoryDisplayableAttributes* attributes)
+{
+    char* parentPath = new char[strlen(directoryPath)];
+    extractParentPathFromPath(directoryPath, parentPath);
+
+    DirectoryEntry* actualDirectoryEntry = nullptr;
+    uint32_t findDirectoryEntryResult = findDirectoryEntryByFullPath(diskInfo, bootSector, directoryPath,
+                                                                     &actualDirectoryEntry);
+    if(findDirectoryEntryResult != FIND_DIRECTORY_ENTRY_BY_PATH_SUCCESS)
+        return DIR_GET_DISPLAYABLE_ATTRIBUTES_FAILED_GIVEN_DIRECTORY_DO_NOT_EXIST;
+
+    uint32_t numOfClustersOccupiedClusters = actualDirectoryEntry->FileSize / getClusterSize(bootSector);
+    if(actualDirectoryEntry->FileSize % getClusterSize(bootSector) == 0) //in case the size occupies the last sector at maximum
+        numOfClustersOccupiedClusters--;
+
+    uint32_t sizeOnDisk = (numOfClustersOccupiedClusters + 1) * getClusterSize(bootSector);
+    uint32_t size = actualDirectoryEntry->FileSize;
+
+    uint32_t getDirectorySizeResult = getDirectoryDetailsByDirectoryEntry(diskInfo, bootSector,
+                                                                          actualDirectoryEntry, size, sizeOnDisk);
+    if(getDirectorySizeResult == DIR_GET_FULL_SIZE_FAILED)
+        return DIR_GET_DISPLAYABLE_ATTRIBUTES_FAILED;
+
+    attributes->FileSizeOnDisk = sizeOnDisk;
+    attributes->FileSize = size;
+
+    attributes->CreationYear = (actualDirectoryEntry->CreationDate >> 9) + 1900;
+    attributes->CreationMonth = (actualDirectoryEntry->CreationDate >> 5) & 0x000F;
+    attributes->CreationDay = actualDirectoryEntry->CreationDate & 0x001F;
+    attributes->CreationHour = (uint32_t) actualDirectoryEntry->CreationTime * 2 / 3600;
+    attributes->CreationMinute = (uint32_t) actualDirectoryEntry->CreationTime * 2 % 3600 / 60;
+    attributes->CreationSecond = (uint32_t) actualDirectoryEntry->CreationTime * 2 % 3600 % 60;
+
+    attributes->LastAccessedYear = (actualDirectoryEntry->LastAccessedDate >> 9) + 1900;
+    attributes->LastAccessedMonth = (actualDirectoryEntry->LastAccessedDate >> 5) & 0x000F;
+    attributes->LastAccessedDay = actualDirectoryEntry->LastAccessedDate & 0x001F;
+
+    attributes->LastWriteYear = (actualDirectoryEntry->LastWriteDate >> 9) + 1900;
+    attributes->LastWriteMonth = (actualDirectoryEntry->LastWriteDate >> 5) & 0x000F;
+    attributes->LastWriteDay = actualDirectoryEntry->LastWriteDate & 0x001F;
+    attributes->LastWriteHour = (uint32_t) actualDirectoryEntry->LastWriteTime * 2 / 3600;
+    attributes->LastWriteMinute = (uint32_t) actualDirectoryEntry->LastWriteTime * 2 % 3600 / 60;
+    attributes->LastWriteSecond= (uint32_t) actualDirectoryEntry->LastWriteTime * 2 % 3600 % 60;
+
+    return DIR_GET_DISPLAYABLE_ATTRIBUTES_SUCCESS;
 }

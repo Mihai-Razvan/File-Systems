@@ -8,12 +8,50 @@
 #include "../include/diskCodes.h"
 #include "../include/utils.h"
 #include "../include/fat32FunctionUtils.h"
+#include "../include/structures.h"
 #include "../include/codes/fat32Codes.h"
 #include "../include/fat32Init.h"
 #include "../include/fat32Attributes.h"
 
+void fat32Startup(char* diskDirectory, DiskInfo** diskInfo, BootSector** bootSector, FsInfo** fsInfo, uint32_t sectorsNumber, uint32_t sectorSize)
+{
+    if(checkDiskInitialization(diskDirectory) == false)
+        initializeDisk(diskDirectory, diskInfo, 1024, 512);
+    else
+        *diskInfo = getDisk(diskDirectory);
 
-bool checkBootSectorsInitialized(DiskInfo* diskInfo)
+    bool fat32AlreadyInitialized = true;
+    if(checkFat32FileSystemInitialization(*diskInfo) == false)
+    {
+        initializeBootSectors(*diskInfo);
+        fat32AlreadyInitialized = false;
+        std::cout << "Boot sectors initialized\n";
+    }
+
+    *bootSector = readBootSector(*diskInfo);
+    *fsInfo = readFsInfo(*diskInfo, *bootSector);
+
+    if(fat32AlreadyInitialized == false)
+    {
+        initializeFat(*diskInfo, *bootSector);
+        std::cout << "File allocation table initialized\n";
+    }
+}
+
+bool checkDiskInitialization(char* diskDirectory)
+{
+    return !(getDisk(diskDirectory) == nullptr);
+}
+
+void initializeDisk(char* diskDirectory, DiskInfo** diskInfo, uint32_t sectorsNumber, uint32_t sectorSize)
+{
+    *diskInfo = initializeDisk(diskDirectory, sectorsNumber, sectorSize);
+    uint32_t batchSize = 1000;
+    fillDiskInitialMemory(*diskInfo, batchSize);
+    std::cout << "Disk initialized\n";
+}
+
+bool checkFat32FileSystemInitialization(DiskInfo* diskInfo)
 {
     char* firstBootSectorBuffer = new char[diskInfo->diskParameters.sectorSizeBytes];
 
@@ -115,16 +153,16 @@ void initializeBootSectors(DiskInfo* diskInfo)
         throw std::runtime_error("Failed to initialize second boot sector");
     }
 
-    //TODO root directoryEntry
     char* rootFileName = new char[11];
     memset(rootFileName, ' ', 11);
     memcpy(rootFileName, "Root", 4); //in root its name 'Root' is in first dir entry, while in root's children will be in dot dot
     DirectoryEntry* rootDirectoryEntry = new DirectoryEntry();
+    memset(rootDirectoryEntry, 0, 32); //to have 0 for values that are not set below
     memcpy(rootDirectoryEntry->FileName, rootFileName, 11);
     rootDirectoryEntry->FileSize = 64; //root dir does not contain dot & dotdot entries, but we consider that they exist for symmetry with other clusters
     rootDirectoryEntry->FirstClusterLow = bootSectorData->RootDirCluster;
     rootDirectoryEntry->FirstClusterHigh = bootSectorData->RootDirCluster >> 16;
-    rootDirectoryEntry->Attributes = ATTR_DIRECTORY;
+    rootDirectoryEntry->Attributes = ATTR_FOLDER;
     char* rootFirstSectorData = new char[bootSectorData->BytesPerSector];
     memset(rootFirstSectorData, 0, bootSectorData->BytesPerSector);
     memcpy(rootFirstSectorData, rootDirectoryEntry, 32);

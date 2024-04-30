@@ -3,8 +3,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <vector>
 
 #include "../include/diskUtils.h"
+#include "../include/structures.h"
 #include "../include/fat32Init.h"
 
 #ifndef FAT32_FAT32_H
@@ -52,8 +54,13 @@ uint32_t writeBytesToFileWithAppend(DiskInfo* diskInfo, BootSector* bootSector, 
 
 uint32_t getSubDirectoriesByParentDirectoryEntry(DiskInfo* diskInfo, BootSector* bootSector, DirectoryEntry* parentDirectoryEntry, std::vector<DirectoryEntry*>& subDirectories);
 
-uint32_t deleteDirectoryEntry(DiskInfo* diskInfo, BootSector* bootSector, DirectoryEntry* directoryEntry);
+//this frees the clusters for direct and indirect children of a directory entry. It does not delete de directory entry from the parent or anything else
+uint32_t freeClustersOfDirectoryAndChildren(DiskInfo* diskInfo, BootSector* bootSector, DirectoryEntry* directoryEntry);
 
 uint32_t deleteDirectoryEntryFromParent(DiskInfo* diskInfo, BootSector* bootSector, DirectoryEntry* givenDirectoryEntry, DirectoryEntry* parentDirectoryEntry);
+
+//Given a directoryEntry, returns the file size & disk size of it and all of its direct & indirect children
+//CAUTION it returns the sizes, but actually only for descendants, its size is not count
+uint32_t getDirectoryDetailsByDirectoryEntry(DiskInfo* diskInfo, BootSector* bootSector, DirectoryEntry* directoryEntry, uint32_t& size, uint32_t& sizeOnDisk);
 
 #endif
